@@ -3,7 +3,7 @@
 # ============================
 import requests
 import time
-from node_config import NODE_ID, COORDINATOR_URL
+from node_config import NODE_ID, COORDINATOR_URL, PORT
 
 STORAGE_AVAILABLE = 1024  # totally real amount of space
 
@@ -12,7 +12,9 @@ def register():
     try:
         res = requests.post(f"{COORDINATOR_URL}/register", json={
             "node_id": NODE_ID,
-            "storage_available": STORAGE_AVAILABLE
+            "storage_available": STORAGE_AVAILABLE,
+            "ip": "127.0.0.1",  # make this dynamic later.
+            "port": PORT
         })
         print(f"[{NODE_ID}] ✅ Registration: {res.status_code} - {res.json()}")
     except Exception as e:
