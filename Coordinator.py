@@ -1,3 +1,7 @@
+from config import TEMP_CHUNK_DIR, TEMP_UPLOAD_DIR, MANIFEST_DIR, CHUNK_SIZE_BYTES
+from pathlib import Path
+import json
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -24,6 +28,35 @@ app = FastAPI()
 #     ]
 # }
 file_manifests = {}
+
+# 🗃️ Load saved manifests from disk
+for manifest_file in MANIFEST_DIR.glob("*.json"):
+    with open(manifest_file, "r") as f:
+        manifest = json.load(f)
+        file_id = manifest_file.stem
+        file_manifests[file_id] = manifest
+print(f"📁 Loaded {len(file_manifests)} manifest(s) from disk")
+
+def save_manifest(file_id: str, original_filename: str, chunk_info: list):
+    """
+    📓 Save a manifest mapping a file to its chunks and storage nodes.
+
+    Args:
+        file_id (str): Unique file identifier.
+        original_filename (str): Name of the original file.
+        chunk_info (list): List of chunk metadata (chunk_id and node_id).
+    """
+    file_manifests[file_id] = {
+        "original_filename": original_filename,
+        "chunks": chunk_info
+    }
+
+    manifest_path = MANIFEST_DIR / f"{file_id}.json"
+    with open(manifest_path, "w") as f:
+        json.dump(file_manifests[file_id], f)
+
+    print(f"📓 Manifest saved for {file_id} with {len(chunk_info)} chunks")
+
 
 # ================================
 # 🤝 Node & Chunk Storage (RAM-Only)
@@ -206,14 +239,14 @@ def upload_file(file: UploadFile = File(...)):
     # 👶 Give this file a unique ID, because we're fancy
     file_id = f"file-{uuid.uuid4().hex[:6]}"
     filename = file.filename
-    temp_file_path = f"temp_{file_id}_{filename}"
+    temp_file_path = TEMP_UPLOAD_DIR / f"temp_{file_id}_{filename}"
 
     # 💾 Save uploaded file locally
     with open(temp_file_path, "wb") as f:
         f.write(file.file.read())
 
     # 🔪 Slice the file into little byte-squares
-    chunk_paths = split_file(temp_file_path, chunk_size_bytes=100 * 1024)  # 100KB chunks
+    chunk_paths = split_file(temp_file_path, chunk_size_bytes=CHUNK_SIZE_BYTES)
 
     if not nodes:
         return {"error": "No nodes online"}, 503
@@ -277,7 +310,7 @@ def download_file(file_id: str, background_tasks: BackgroundTasks):
         return {"error": "File not found"}, 404
 
     # 🗃️ Make a folder to store the returning chunk babies
-    temp_dir = f"temp_chunks_{file_id}"
+    temp_dir = TEMP_CHUNK_DIR / f"{file_id}"
     os.makedirs(temp_dir, exist_ok=True)
 
     # 🔄 Loop through each chunk in the manifest
@@ -326,3 +359,26 @@ def cleanup_temp_folder(folder_path: str):
         print(f"🧼 Cleaned up: {folder_path}")
     except Exception as e:
         print(f"⚠️ Failed to clean {folder_path}: {e}")
+
+
+@app.get("/status")
+def get_system_status():
+    """
+    📊 Return current system status including nodes, files, and chunks.
+
+    Returns:
+        dict: Overview of registered nodes, stored files, and chunk distribution.
+    """
+    return {
+        "node_count": len(nodes),
+        "registered_nodes": list(nodes.keys()),
+        "file_count": len(file_manifests),
+        "files": {
+            file_id: {
+                "original_filename": manifest["original_filename"],
+                "chunk_count": len(manifest["chunks"])
+            }
+            for file_id, manifest in file_manifests.items()
+        },
+        "total_chunks": sum(len(m["chunks"]) for m in file_manifests.values())
+    }
