@@ -15,6 +15,8 @@ import requests
 import shutil
 from chunk_utils import split_file, reassemble_file  # Your lovely util
 
+CHUNK_REDUNDANCY = 2
+
 app = FastAPI()
 
 # ============================
@@ -141,7 +143,7 @@ def heartbeat(hb: Heartbeat):
     if hb.node_id in nodes:
         nodes[hb.node_id]["last_seen"] = time.time()
         return {"status": "alive"}
-    raise HTTPException(status_code=404, detail="Node not found")
+    raise HTTPException(status_code=404, detail=f"Node id {hb.node_id} not found")
 
 # ================================
 # 📡 List all known nodes
@@ -194,20 +196,6 @@ def assign_chunk(assignment: ChunkAssignment):
         chunk_map[assignment.chunk_id].append(assignment.node_id)
     return {"status": "chunk assigned"}
 
-def save_manifest(file_id: str, original_filename: str, chunk_info: list):
-    """
-    📓 Save a manifest mapping a file to its chunks and storage nodes.
-
-    Args:
-        file_id (str): Unique file identifier.
-        original_filename (str): Name of the original file.
-        chunk_info (list): List of chunk metadata (chunk_id and node_id).
-    """
-    file_manifests[file_id] = {
-        "original_filename": original_filename,
-        "chunks": chunk_info
-    }
-    print(f"📓 Manifest saved for {file_id} with {len(chunk_info)} chunks")
 
 @app.get("/manifest/{file_id}")
 def get_manifest(file_id: str):
@@ -257,27 +245,37 @@ def upload_file(file: UploadFile = File(...)):
         chunk_id = os.path.basename(chunk_path)
 
         # 🎯 Pick a random node to send the chunk to
-        node_id = random.choice(list(nodes.keys()))
-        node_info = nodes[node_id]
-        node_url = f"http://{node_info['ip']}:{node_info['port']}/store_chunk"
+        available_nodes = list(nodes.keys())
+        selected_nodes = random.sample(available_nodes, min(CHUNK_REDUNDANCY, len(available_nodes)))
 
-        try:
-            with open(chunk_path, "rb") as chunk_file:
-                res = requests.post(node_url, files={
-                    "chunk": chunk_file
-                }, data={
-                    "chunk_id": chunk_id
-                })
-            if res.status_code == 200:
-                print(f"📦 Sent {chunk_id} to {node_id}")
-                chunk_records.append({
-                    "chunk_id": chunk_id,
-                    "node_id": node_id
-                })
-            else:
-                print(f"⚠️ Failed to store chunk {chunk_id} on {node_id}")
-        except Exception as e:
-            print(f"🔥 Error sending chunk {chunk_id} to {node_id}: {e}")
+        chunk_success_nodes = []
+
+        for node_id in selected_nodes:
+            node_info = nodes[node_id]
+            node_url = f"http://{node_info['ip']}:{node_info['port']}/store_chunk"
+
+            try:
+                with open(chunk_path, "rb") as chunk_file:
+                    res = requests.post(node_url, files={
+                        "chunk": chunk_file
+                    }, data={
+                        "chunk_id": chunk_id
+                    })
+
+                if res.status_code == 200:
+                    print(f"📦 Sent {chunk_id} to {node_id}")
+                    chunk_success_nodes.append(node_id)
+                else:
+                    print(f"⚠️ Failed to store chunk {chunk_id} on {node_id}")
+            except Exception as e:
+                print(f"🔥 Error sending chunk {chunk_id} to {node_id}: {e}")
+
+
+        chunk_records.append({
+            "chunk_id": chunk_id,
+            "node_ids": chunk_success_nodes
+        })
+
 
     # 📓 Save the manifest
     save_manifest(file_id, filename, chunk_records)
@@ -304,47 +302,58 @@ def download_file(file_id: str, background_tasks: BackgroundTasks):
     Returns:
         FileResponse: The fully reassembled file.
     """
-    # 🧠 Get the manifest (it's the treasure map)
+
+    # 🧠 Get the manifest (it’s the treasure map for all chunks)
     manifest = file_manifests.get(file_id)
     if not manifest:
         return {"error": "File not found"}, 404
 
-    # 🗃️ Make a folder to store the returning chunk babies
+    # 🗃️ Temp folder to hold the recovered chunks (yes, a chunk orphanage)
     temp_dir = TEMP_CHUNK_DIR / f"{file_id}"
     os.makedirs(temp_dir, exist_ok=True)
 
     # 🔄 Loop through each chunk in the manifest
     for chunk in manifest["chunks"]:
         chunk_id = chunk["chunk_id"]
-        node_id = chunk["node_id"]
+        node_ids = chunk["node_ids"]  # this is now a list thanks to redundancy
 
-        # 🛰️ Find the node where the chunk lives
-        node = nodes.get(node_id)
-        if not node:
-            return {"error": f"Node {node_id} not available"}, 503
+        chunk_downloaded = False  # 📉 pessimistic by default
 
-        # 🌐 Build the URL to fetch the chunk from the node
-        url = f"http://{node['ip']}:{node['port']}/chunk/{chunk_id}"
-        try:
-            # 📡 GET the chunk like we're Netflix buffering
-            res = requests.get(url)
-            if res.status_code == 200:
-                # 💾 Save it to our local chunk graveyard
-                with open(os.path.join(temp_dir, chunk_id), "wb") as f:
-                    f.write(res.content)
-            else:
-                return {"error": f"Failed to fetch chunk {chunk_id} from {node_id}"}, 502
-        except Exception as e:
-            return {"error": str(e)}, 500
+        # 🛰️ Try each node until one gives us the chunk like a good citizen
+        for node_id in node_ids:
+            node = nodes.get(node_id)
+            if not node:
+                continue  # ❌ node is offline or vaporized, skip
 
-    # 🧩 All chunks retrieved, time to stitch the beast
+            # 🌐 Make the GET request to that node’s chunk endpoint
+            url = f"http://{node['ip']}:{node['port']}/chunk/{chunk_id}"
+            try:
+                res = requests.get(url)
+                if res.status_code == 200:
+                    # 💾 Save it to our temporary chunk folder (the safehouse)
+                    with open(os.path.join(temp_dir, chunk_id), "wb") as f:
+                        f.write(res.content)
+                    print(f"✅ Retrieved {chunk_id} from {node_id}")
+                    chunk_downloaded = True
+                    break  # 🎉 got it, don’t try others
+                else:
+                    print(f"⚠️ {chunk_id} failed from {node_id}")
+            except Exception as e:
+                print(f"🔥 Exception fetching {chunk_id} from {node_id}: {e}")
+
+        if not chunk_downloaded:
+            return {"error": f"All nodes failed to serve chunk {chunk_id}"}, 502
+
+    # 🧩 All chunks retrieved successfully, time to stitch the Frankenstein
     output_file = f"reassembled_{manifest['original_filename']}"
     reassemble_file(output_file, temp_dir)
 
+    # 🧼 Clean up the temp chunk orphanage after response is done
     background_tasks.add_task(cleanup_temp_folder, temp_dir)
 
-    # 🎁 Send the reassembled file back like a gift
+    # 🎁 Give the user their reassembled file like a digital UberEats
     return FileResponse(output_file, filename=manifest["original_filename"])
+
 
 
 def cleanup_temp_folder(folder_path: str):
