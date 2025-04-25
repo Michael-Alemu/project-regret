@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Dict, List
 import time
+import threading
 
 import os
 import uuid
@@ -15,7 +16,10 @@ import requests
 import shutil
 from chunk_utils import split_file, reassemble_file  # Your lovely util
 
-CHUNK_REDUNDANCY = 2
+CHUNK_REDUNDANCY = 3
+HEARTBEAT_TIMEOUT = 30
+healing_queue = []  # 🚑 Chunks that need help
+
 
 app = FastAPI()
 
@@ -132,17 +136,25 @@ def register_node(node: dict):
 @app.post("/heartbeat")
 def heartbeat(hb: Heartbeat):
     """
-    ❤️ Update the last seen timestamp of a node.
-
-    Args:
+    ❤️ Node heartbeat. Updates 'last_seen', or mourns the dead.
+     Args:
         hb (Heartbeat): Heartbeat payload.
 
     Returns:
         dict: Heartbeat acknowledgment.
     """
+    now = time.time()
+
+    # ⏳ Check if any nodes are dead
+    for node_id in list(nodes.keys()):
+        if now - nodes[node_id]["last_seen"] > HEARTBEAT_TIMEOUT:
+            mark_node_dead(node_id)
+            del nodes[node_id]
+
     if hb.node_id in nodes:
-        nodes[hb.node_id]["last_seen"] = time.time()
+        nodes[hb.node_id]["last_seen"] = now
         return {"status": "alive"}
+
     raise HTTPException(status_code=404, detail=f"Node id {hb.node_id} not found")
 
 # ================================
@@ -270,12 +282,16 @@ def upload_file(file: UploadFile = File(...)):
             except Exception as e:
                 print(f"🔥 Error sending chunk {chunk_id} to {node_id}: {e}")
 
+        if chunk_success_nodes:
+            chunk_records.append({
+                "chunk_id": chunk_id,
+                "node_ids": chunk_success_nodes
+            })
+        else:
+            print(f"❌ No nodes accepted chunk {chunk_id}, skipping.")
 
-        chunk_records.append({
-            "chunk_id": chunk_id,
-            "node_ids": chunk_success_nodes
-        })
-
+    if len(chunk_records) != len(chunk_paths):
+        print("⚠️ Warning: Some chunks failed to store and were excluded from manifest.")
 
     # 📓 Save the manifest
     save_manifest(file_id, filename, chunk_records)
@@ -391,3 +407,85 @@ def get_system_status():
         },
         "total_chunks": sum(len(m["chunks"]) for m in file_manifests.values())
     }
+
+@app.post("/heal_now")
+def heal_now():
+    """
+    🧪 Manual Healing Trigger
+    Fire this to kick off one round of healing manually.
+    """
+    threading.Thread(target=heal_chunks, daemon=True).start()
+    return {"status": "Healing started in background"}
+
+def mark_node_dead(dead_node_id: str):
+    """
+    💀 Removes dead node from manifests and adds affected chunks to the healing queue.
+    """
+    print(f"⚰️ Node {dead_node_id} marked dead")
+    for file_id, manifest in file_manifests.items():
+        for chunk in manifest["chunks"]:
+            if dead_node_id in chunk["node_ids"]:
+                chunk["node_ids"].remove(dead_node_id)
+                if len(chunk["node_ids"]) < CHUNK_REDUNDANCY:
+                    if chunk["chunk_id"] not in healing_queue:
+                        healing_queue.append(chunk["chunk_id"])
+                        print(f"🚑 Queued {chunk['chunk_id']} for healing")
+
+
+def heal_chunks():
+    """
+    🩹 New & Improved Healing Loop: only works on the queue of known injured chunks.
+    """
+    while True:
+        if healing_queue:
+            print(f"🧪 Healing Queue: {len(healing_queue)} chunks")
+        else:
+            time.sleep(5)
+            continue
+
+        chunk_id = healing_queue.pop(0)  # FIFO healing
+
+        # 🧙 Scan all manifests for this chunk
+        for file_id, manifest in file_manifests.items():
+            for chunk in manifest["chunks"]:
+                if chunk["chunk_id"] != chunk_id:
+                    continue
+
+                alive_nodes = chunk["node_ids"]
+                needed = CHUNK_REDUNDANCY - len(alive_nodes)
+
+                if needed <= 0:
+                    break  # nothing to do
+
+                available_nodes = [nid for nid in nodes if nid not in alive_nodes]
+                random.shuffle(available_nodes)
+
+                for new_node in available_nodes:
+                    if needed == 0:
+                        break
+                    if not alive_nodes:
+                        print(f"⚠️ No healthy replicas for {chunk_id}")
+                        break
+
+                    donor_node = random.choice(alive_nodes)
+                    chunk_url = f"http://{nodes[donor_node]['ip']}:{nodes[donor_node]['port']}/chunk/{chunk_id}"
+                    store_url = f"http://{nodes[new_node]['ip']}:{nodes[new_node]['port']}/store_chunk"
+
+                    try:
+                        res = requests.get(chunk_url)
+                        if res.status_code == 200:
+                            push = requests.post(store_url, files={"chunk": res.content}, data={"chunk_id": chunk_id})
+                            if push.status_code == 200:
+                                chunk["node_ids"].append(new_node)
+                                alive_nodes.append(new_node)
+                                needed -= 1
+                                print(f"🧩 Healed {chunk_id} → {new_node}")
+                        else:
+                            print(f"⚠️ Chunk {chunk_id} fetch from {donor_node} failed")
+                    except Exception as e:
+                        print(f"🔥 Healing error: {e}")
+                break
+
+
+# 🧵 Launch background healing thread on startup
+threading.Thread(target=heal_chunks, daemon=True).start()
