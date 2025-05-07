@@ -14,14 +14,38 @@ import uuid
 import random
 import requests
 import shutil
-from chunk_utils import split_file, reassemble_file  # Your lovely util
+from chunk_utils import split_file, reassemble_file
+from crypto_utils import decrypt_bytes,  generate_key, encrypt_bytes
 
 CHUNK_REDUNDANCY = 3
 HEARTBEAT_TIMEOUT = 30
 healing_queue = []  # 🚑 Chunks that need help
 
+# ============================
+# 🔐 Encryption Keys Persistence
+# ============================
+
+KEYS_FILE = "encryption_keys.json"
+
+def save_keys_to_disk():
+    """ Save encryption keys to disk (plaintext) """
+    with open(KEYS_FILE, "w") as f:
+        json.dump(encryption_keys, f)
+    print(f"💾 Saved encryption keys to {KEYS_FILE}")
+
+def load_keys_from_disk():
+    """ Load encryption keys from disk if available """
+    global encryption_keys
+    if os.path.exists(KEYS_FILE):
+        with open(KEYS_FILE, "r") as f:
+            encryption_keys = json.load(f)
+        print(f"🔑 Loaded {len(encryption_keys)} encryption keys from {KEYS_FILE}")
+    else:
+        print(f"🕳️ No encryption keys file found. Starting fresh.")
+
 
 app = FastAPI()
+load_keys_from_disk()
 
 # ============================
 # 📓 Manifest store (in-memory)
@@ -208,6 +232,9 @@ def assign_chunk(assignment: ChunkAssignment):
         chunk_map[assignment.chunk_id].append(assignment.node_id)
     return {"status": "chunk assigned"}
 
+@app.get("/keys")
+def get_keys_info():
+    return {"stored_keys": len(encryption_keys)}
 
 @app.get("/manifest/{file_id}")
 def get_manifest(file_id: str):
@@ -228,7 +255,7 @@ def get_manifest(file_id: str):
 @app.post("/upload_file")
 def upload_file(file: UploadFile = File(...)):
     """
-    📤 Upload and distribute a file across registered nodes.
+    📤 Upload and distribute an encrypted file across registered nodes.
 
     Args:
         file (UploadFile): File uploaded via POST.
@@ -245,6 +272,11 @@ def upload_file(file: UploadFile = File(...)):
     with open(temp_file_path, "wb") as f:
         f.write(file.file.read())
 
+    # 🛡️ Generate an encryption key for this file
+    file_key = generate_key()
+    encryption_keys[file_id] = file_key
+    save_keys_to_disk()
+
     # 🔪 Slice the file into little byte-squares
     chunk_paths = split_file(temp_file_path, chunk_size_bytes=CHUNK_SIZE_BYTES)
 
@@ -253,8 +285,15 @@ def upload_file(file: UploadFile = File(...)):
 
     chunk_records = []
 
-    for i, chunk_path in enumerate(chunk_paths):
+    for chunk_path in chunk_paths:
         chunk_id = os.path.basename(chunk_path)
+
+        # 🧹 Read the raw chunk
+        with open(chunk_path, "rb") as chunk_file:
+            chunk_data = chunk_file.read()
+
+        # 🔒 Encrypt the chunk BEFORE upload
+        encrypted_chunk = encrypt_bytes(chunk_data, file_key)
 
         # 🎯 Pick a random node to send the chunk to
         available_nodes = list(nodes.keys())
@@ -267,12 +306,11 @@ def upload_file(file: UploadFile = File(...)):
             node_url = f"http://{node_info['ip']}:{node_info['port']}/store_chunk"
 
             try:
-                with open(chunk_path, "rb") as chunk_file:
-                    res = requests.post(node_url, files={
-                        "chunk": chunk_file
-                    }, data={
-                        "chunk_id": chunk_id
-                    })
+                res = requests.post(node_url, files={
+                    "chunk": (chunk_id, encrypted_chunk)
+                }, data={
+                    "chunk_id": chunk_id
+                })
 
                 if res.status_code == 200:
                     print(f"📦 Sent {chunk_id} to {node_id}")
@@ -310,64 +348,65 @@ def upload_file(file: UploadFile = File(...)):
 @app.get("/download_file/{file_id}")
 def download_file(file_id: str, background_tasks: BackgroundTasks):
     """
-    📦 Download and reassemble a file using its manifest.
+    📦 Download, decrypt, and reassemble a file using its manifest.
 
     Args:
         file_id (str): The ID of the file to download.
 
     Returns:
-        FileResponse: The fully reassembled file.
+        FileResponse: The fully reassembled and decrypted file.
     """
-
-    # 🧠 Get the manifest (it’s the treasure map for all chunks)
+    # 🧠 Get the manifest (it's the treasure map)
     manifest = file_manifests.get(file_id)
     if not manifest:
         return {"error": "File not found"}, 404
 
-    # 🗃️ Temp folder to hold the recovered chunks (yes, a chunk orphanage)
+    # 🔑 Get the encryption key
+    file_key = encryption_keys.get(file_id)
+    if not file_key:
+        return {"error": "Encryption key not found"}, 500
+
+    # 🗃️ Make a folder to store the returning chunk babies
     temp_dir = TEMP_CHUNK_DIR / f"{file_id}"
     os.makedirs(temp_dir, exist_ok=True)
 
     # 🔄 Loop through each chunk in the manifest
     for chunk in manifest["chunks"]:
         chunk_id = chunk["chunk_id"]
-        node_ids = chunk["node_ids"]  # this is now a list thanks to redundancy
+        node_ids = chunk["node_ids"]
 
-        chunk_downloaded = False  # 📉 pessimistic by default
-
-        # 🛰️ Try each node until one gives us the chunk like a good citizen
+        # 🛰️ Try fetching from any available node
+        success = False
         for node_id in node_ids:
             node = nodes.get(node_id)
             if not node:
-                continue  # ❌ node is offline or vaporized, skip
+                continue
 
-            # 🌐 Make the GET request to that node’s chunk endpoint
             url = f"http://{node['ip']}:{node['port']}/chunk/{chunk_id}"
             try:
                 res = requests.get(url)
                 if res.status_code == 200:
-                    # 💾 Save it to our temporary chunk folder (the safehouse)
+                    # 🔓 Decrypt the chunk before saving
+                    decrypted_chunk = decrypt_bytes(res.content, file_key)
+
                     with open(os.path.join(temp_dir, chunk_id), "wb") as f:
-                        f.write(res.content)
-                    print(f"✅ Retrieved {chunk_id} from {node_id}")
-                    chunk_downloaded = True
-                    break  # 🎉 got it, don’t try others
-                else:
-                    print(f"⚠️ {chunk_id} failed from {node_id}")
-            except Exception as e:
-                print(f"🔥 Exception fetching {chunk_id} from {node_id}: {e}")
+                        f.write(decrypted_chunk)
 
-        if not chunk_downloaded:
-            return {"error": f"All nodes failed to serve chunk {chunk_id}"}, 502
+                    success = True
+                    break  # ✅ Done, stop trying nodes
+            except Exception:
+                continue
 
-    # 🧩 All chunks retrieved successfully, time to stitch the Frankenstein
+        if not success:
+            return {"error": f"Failed to fetch chunk {chunk_id} from any node"}, 502
+
+    # 🧩 All chunks retrieved and decrypted, time to stitch the beast
     output_file = f"reassembled_{manifest['original_filename']}"
     reassemble_file(output_file, temp_dir)
 
-    # 🧼 Clean up the temp chunk orphanage after response is done
     background_tasks.add_task(cleanup_temp_folder, temp_dir)
 
-    # 🎁 Give the user their reassembled file like a digital UberEats
+    # 🎁 Send the reassembled file back like a gift
     return FileResponse(output_file, filename=manifest["original_filename"])
 
 
