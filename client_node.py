@@ -16,7 +16,7 @@ def register():
             "ip": "127.0.0.1",  # make this dynamic later.
             "port": PORT
         })
-        print(f"[{NODE_ID}] ✅ Registration: {res.status_code} - {res.json()}")
+        print(f"[{NODE_ID}] ✅ Registration: {res.status_code} - {res.json()} PORT 🔌 {PORT}")
     except Exception as e:
         print(f"[{NODE_ID}] ❌ Registration failed: {e}")
 
@@ -26,9 +26,17 @@ def heartbeat():
             res = requests.post(f"{COORDINATOR_URL}/heartbeat", json={
                 "node_id": NODE_ID
             })
-            print(f"[{NODE_ID}] ❤️ Beat: {res.status_code}")
+
+            if res.status_code == 200:
+                print(f"[{NODE_ID}] ❤️ Coordinator {res.status_code}.")
+            else:
+                print(f"[{NODE_ID}] 💔 Unexpected heartbeat response: {res.status_code} - {res.text}")
+
+        except requests.exceptions.ConnectionError:
+            print(f"[{NODE_ID}] ❌ Coordinator unreachable. Is it running at {COORDINATOR_URL}?")
         except Exception as e:
-            print(f"[{NODE_ID}] 💔 Heartbeat failed: {e}")
+            print(f"[{NODE_ID}] 💥 Unknown heartbeat error: {type(e).__name__} - {e}")
+
         time.sleep(5)
 
 if __name__ == "__main__":

@@ -1,6 +1,4 @@
-Of course, Commander of Chunks.  
-Here’s your **`Chunkboard.md`** ready to roll:  
-*(this will also be super clean so you can copy-paste or save it directly)*
+
 
 ---
 

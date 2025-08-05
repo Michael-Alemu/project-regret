@@ -1,7 +1,11 @@
+# ============================
+# 🎬 Imports & Config
+# ============================
 from config import TEMP_CHUNK_DIR, TEMP_UPLOAD_DIR, MANIFEST_DIR, CHUNK_SIZE_BYTES
 from pathlib import Path
 import json
 
+from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -14,91 +18,38 @@ import uuid
 import random
 import requests
 import shutil
+import base64
 from chunk_utils import split_file, reassemble_file
-from crypto_utils import decrypt_bytes,  generate_key, encrypt_bytes
+from crypto_utils import decrypt_bytes, generate_key, encrypt_bytes
+from manifest_utils import ManifestChunkManager
 
+# ============================
+# 🏁 Global Constants
+# ============================
 CHUNK_REDUNDANCY = 3
 HEARTBEAT_TIMEOUT = 30
-healing_queue = []  # 🚑 Chunks that need help
+healing_queue = []
 
 # ============================
-# 🔐 Encryption Keys Persistence
+# 📜 Manifest Manager Setup
 # ============================
+manifest_encryption_key = generate_key()
 
-KEYS_FILE = "encryption_keys.json"
-
-def save_keys_to_disk():
-    """ Save encryption keys to disk (plaintext) """
-    with open(KEYS_FILE, "w") as f:
-        json.dump(encryption_keys, f)
-    print(f"💾 Saved encryption keys to {KEYS_FILE}")
-
-def load_keys_from_disk():
-    """ Load encryption keys from disk if available """
-    global encryption_keys
-    if os.path.exists(KEYS_FILE):
-        with open(KEYS_FILE, "r") as f:
-            encryption_keys = json.load(f)
-        print(f"🔑 Loaded {len(encryption_keys)} encryption keys from {KEYS_FILE}")
-    else:
-        print(f"🕳️ No encryption keys file found. Starting fresh.")
-
-
-app = FastAPI()
-load_keys_from_disk()
+manifest_manager = ManifestChunkManager(
+    manifest_dir=MANIFEST_DIR,
+    chunk_size=4096,
+    encryption_key=manifest_encryption_key
+)
 
 # ============================
-# 📓 Manifest store (in-memory)
+# ⚙️ RAM-Based Node Registry
 # ============================
+nodes: Dict[str, Dict[str, float]] = {}
+chunk_map: Dict[str, List[str]] = {}
 
-# file_id: {
-#     "original_filename": str,
-#     "chunks": [
-#         {"chunk_id": str, "node_id": str}
-#     ]
-# }
-file_manifests = {}
-
-# 🗃️ Load saved manifests from disk
-for manifest_file in MANIFEST_DIR.glob("*.json"):
-    with open(manifest_file, "r") as f:
-        manifest = json.load(f)
-        file_id = manifest_file.stem
-        file_manifests[file_id] = manifest
-print(f"📁 Loaded {len(file_manifests)} manifest(s) from disk")
-
-def save_manifest(file_id: str, original_filename: str, chunk_info: list):
-    """
-    📓 Save a manifest mapping a file to its chunks and storage nodes.
-
-    Args:
-        file_id (str): Unique file identifier.
-        original_filename (str): Name of the original file.
-        chunk_info (list): List of chunk metadata (chunk_id and node_id).
-    """
-    file_manifests[file_id] = {
-        "original_filename": original_filename,
-        "chunks": chunk_info
-    }
-
-    manifest_path = MANIFEST_DIR / f"{file_id}.json"
-    with open(manifest_path, "w") as f:
-        json.dump(file_manifests[file_id], f)
-
-    print(f"📓 Manifest saved for {file_id} with {len(chunk_info)} chunks")
-
-
-# ================================
-# 🤝 Node & Chunk Storage (RAM-Only)
-# ================================
-
-nodes: Dict[str, Dict[str, float]] = {}  # node_id -> { storage: int, last_seen: float }
-chunk_map: Dict[str, List[str]] = {}    # chunk_id -> list of node_ids
-
-# ================================
-# 📦 Models for incoming JSON data
-# ================================
-
+# ============================
+# 📦 API Models
+# ============================
 class NodeRegistration(BaseModel):
     """
     📦 Node registration payload schema.
@@ -130,13 +81,15 @@ class ChunkAssignment(BaseModel):
     chunk_id: str  # unique chunk name
     node_id: str   # node that stores this chunk
 
-# ================================
-# 🚪 Register a new node
-# ================================
+# ============================
+# 🚪 Node Registration Endpoint
+# ============================
+app = FastAPI()
+
 @app.post("/register")
 def register_node(node: dict):
     """
-    🚪 Register a node with the coordinator.
+    🚪 Doorway to the network. Enter your info, traveler.
 
     Args:
         node (dict): Node metadata including ID, IP, port, and storage.
@@ -154,13 +107,13 @@ def register_node(node: dict):
     print(f"🆕 Registered node {node_id} at {node['ip']}:{node['port']}")
     return {"status": "registered"}
 
-# ================================
-# ❤️ Heartbeat endpoint
-# ================================
+# ============================
+# ❤️ Heartbeat Monitor
+# ============================
 @app.post("/heartbeat")
 def heartbeat(hb: Heartbeat):
     """
-    ❤️ Node heartbeat. Updates 'last_seen', or mourns the dead.
+    ❤️ Nodes yell out: "I'm alive!" Otherwise we hold a funeral.
      Args:
         hb (Heartbeat): Heartbeat payload.
 
@@ -169,34 +122,40 @@ def heartbeat(hb: Heartbeat):
     """
     now = time.time()
 
-    # ⏳ Check if any nodes are dead
+    # --- THIS PART MOVES TO THE TOP ---
+    # 1. Let the living node check in and update its 'last_seen' timestamp.
+    if hb.node_id in nodes:
+        nodes[hb.node_id]["last_seen"] = now
+    else:
+        # If a node sends a heartbeat but isn't registered, it's a ghost.
+        raise HTTPException(status_code=404, detail=f"Ghost node {hb.node_id} tried to heartbeat. Not registered.")
+    # --- END OF MOVED PART ---
+
+    # 2. NOW, after everyone's had a chance to check in, find the ones who didn't.
     for node_id in list(nodes.keys()):
-        if now - nodes[node_id]["last_seen"] > HEARTBEAT_TIMEOUT:
+        # Use a slightly longer timeout here to be safe
+        if now - nodes[node_id].get("last_seen", 0) > HEARTBEAT_TIMEOUT:
             mark_node_dead(node_id)
             del nodes[node_id]
 
-    if hb.node_id in nodes:
-        nodes[hb.node_id]["last_seen"] = now
-        return {"status": "alive"}
+    return {"status": "alive"}  # We can return alive even if others died.
 
-    raise HTTPException(status_code=404, detail=f"Node id {hb.node_id} not found")
-
-# ================================
-# 📡 List all known nodes
-# ================================
+# ============================
+# 📡 View Active Nodes
+# ============================
 @app.get("/nodes")
 def get_nodes():
     """
-    📡 Retrieve all currently known nodes.
+     📡 Peek behind the curtain — see who's online.
 
     Returns:
         dict: Node metadata including IP, port, and last seen.
     """
     return nodes
 
-# ================================
-# 🔍 Where is this chunk?
-# ================================
+# ============================
+# 🔍 Find Chunk Holders
+# ============================
 @app.get("/chunk/{chunk_id}")
 def get_chunk_locations(chunk_id: str):
     """
@@ -212,13 +171,13 @@ def get_chunk_locations(chunk_id: str):
         return {"nodes": chunk_map[chunk_id]}
     raise HTTPException(status_code=404, detail="Chunk not found")
 
-# ================================
-# 📦 Assign a chunk to a node
-# ================================
+# ============================
+# 📦 Manual Chunk Assignment
+# ============================
 @app.post("/chunk")
 def assign_chunk(assignment: ChunkAssignment):
     """
-    📦 Assign a chunk to a specified node.
+    📦 Sling a chunk over to a chosen node.
 
     Args:
         assignment (ChunkAssignment): Chunk assignment request.
@@ -232,10 +191,19 @@ def assign_chunk(assignment: ChunkAssignment):
         chunk_map[assignment.chunk_id].append(assignment.node_id)
     return {"status": "chunk assigned"}
 
+# ============================
+# 🔑 Encryption Keys Info
+# ============================
 @app.get("/keys")
 def get_keys_info():
-    return {"stored_keys": len(encryption_keys)}
+    """
+    🔑 How many secrets do we know?
+    """
+    return {"stored_keys": len(manifest_manager.list_manifests())}
 
+# ============================
+# 📜 Retrieve Manifest
+# ============================
 @app.get("/manifest/{file_id}")
 def get_manifest(file_id: str):
     """
@@ -247,15 +215,24 @@ def get_manifest(file_id: str):
     Returns:
         dict: File manifest or 404 error.
     """
-    manifest = file_manifests.get(file_id)
+    manifest = manifest_manager.load_manifest(file_id)
     if not manifest:
         return {"error": "file_id not found"}, 404
+
+    # 🧽 Patch it for JSON friendliness
+    if isinstance(manifest.get("encryption_key"), bytes):
+        manifest["encryption_key"] = base64.urlsafe_b64encode(
+        manifest["encryption_key"]
+    ).decode("utf-8")
     return manifest
 
+# ============================
+# 📤 Upload + Chunkify + Encrypt
+# ============================
 @app.post("/upload_file")
 def upload_file(file: UploadFile = File(...)):
     """
-    📤 Upload and distribute an encrypted file across registered nodes.
+    📤 Split it, scramble it, send it. It's magic.
 
     Args:
         file (UploadFile): File uploaded via POST.
@@ -274,10 +251,6 @@ def upload_file(file: UploadFile = File(...)):
 
     # 🛡️ Generate an encryption key for this file
     file_key = generate_key()
-    encryption_keys[file_id] = file_key
-    save_keys_to_disk()
-
-    # 🔪 Slice the file into little byte-squares
     chunk_paths = split_file(temp_file_path, chunk_size_bytes=CHUNK_SIZE_BYTES)
 
     if not nodes:
@@ -306,12 +279,7 @@ def upload_file(file: UploadFile = File(...)):
             node_url = f"http://{node_info['ip']}:{node_info['port']}/store_chunk"
 
             try:
-                res = requests.post(node_url, files={
-                    "chunk": (chunk_id, encrypted_chunk)
-                }, data={
-                    "chunk_id": chunk_id
-                })
-
+                res = requests.post(node_url, files={"chunk": (chunk_id, encrypted_chunk)}, data={"chunk_id": chunk_id})
                 if res.status_code == 200:
                     print(f"📦 Sent {chunk_id} to {node_id}")
                     chunk_success_nodes.append(node_id)
@@ -328,11 +296,14 @@ def upload_file(file: UploadFile = File(...)):
         else:
             print(f"❌ No nodes accepted chunk {chunk_id}, skipping.")
 
-    if len(chunk_records) != len(chunk_paths):
-        print("⚠️ Warning: Some chunks failed to store and were excluded from manifest.")
+    # 🛡️ Generate a JSON-safe encryption key string for THIS file
+    file_key_string = file_key if isinstance(file_key, str) else file_key.decode("utf-8") # This now returns a string
 
-    # 📓 Save the manifest
-    save_manifest(file_id, filename, chunk_records)
+    manifest_manager.save_manifest(file_id, {
+        "original_filename": filename,
+        "chunks": chunk_records,
+        "encryption_key": file_key_string
+    })
 
     # 🧹 Clean up temporary file + chunks
     os.remove(temp_file_path)
@@ -342,9 +313,8 @@ def upload_file(file: UploadFile = File(...)):
     return {"file_id": file_id, "chunks_stored": len(chunk_records)}
 
 # ============================
-# 📦 Chunk Recovery Endpoint
+# 📦 Download + Reassemble
 # ============================
-
 @app.get("/download_file/{file_id}")
 def download_file(file_id: str, background_tasks: BackgroundTasks):
     """
@@ -356,13 +326,12 @@ def download_file(file_id: str, background_tasks: BackgroundTasks):
     Returns:
         FileResponse: The fully reassembled and decrypted file.
     """
-    # 🧠 Get the manifest (it's the treasure map)
-    manifest = file_manifests.get(file_id)
+    manifest = manifest_manager.load_manifest(file_id)
     if not manifest:
         return {"error": "File not found"}, 404
 
     # 🔑 Get the encryption key
-    file_key = encryption_keys.get(file_id)
+    file_key = manifest.get("encryption_key")
     if not file_key:
         return {"error": "Encryption key not found"}, 500
 
@@ -409,8 +378,9 @@ def download_file(file_id: str, background_tasks: BackgroundTasks):
     # 🎁 Send the reassembled file back like a gift
     return FileResponse(output_file, filename=manifest["original_filename"])
 
-
-
+# ============================
+# 🧹 Cleanup Temporary Graveyards
+# ============================
 def cleanup_temp_folder(folder_path: str):
     """
     🧼 Clean up temporary folder used during file recovery.
@@ -424,107 +394,181 @@ def cleanup_temp_folder(folder_path: str):
     except Exception as e:
         print(f"⚠️ Failed to clean {folder_path}: {e}")
 
-
+# ============================
+# 📊 System Status Dashboard
+# ============================
 @app.get("/status")
 def get_system_status():
     """
+    Check the heartbeats of the universe.
     📊 Return current system status including nodes, files, and chunks.
 
     Returns:
         dict: Overview of registered nodes, stored files, and chunk distribution.
     """
+    all_manifest_ids = manifest_manager.list_manifests()
+
+    file_details = {}
+    errors = []
+    total_chunks = 0
+
+    # NOW, we try to load each one, and we prepare for failure.
+    for file_id in all_manifest_ids:
+        try:
+            # Try to perform the dangerous act of loading a manifest
+            manifest = manifest_manager.load_manifest(file_id)
+            chunk_count = len(manifest.get("chunks", []))
+            file_details[file_id] = {
+                "original_filename": manifest.get("original_filename", "N/A"),
+                "chunk_count": chunk_count
+            }
+            total_chunks += chunk_count
+        except Exception as e:
+            # If a manifest is broken, DON'T CRASH. Report it.
+            errors.append({"file_id": file_id, "error": str(e)})
+
     return {
         "node_count": len(nodes),
         "registered_nodes": list(nodes.keys()),
-        "file_count": len(file_manifests),
-        "files": {
-            file_id: {
-                "original_filename": manifest["original_filename"],
-                "chunk_count": len(manifest["chunks"])
-            }
-            for file_id, manifest in file_manifests.items()
-        },
-        "total_chunks": sum(len(m["chunks"]) for m in file_manifests.values())
+        "file_count": len(all_manifest_ids),
+        "files": file_details,
+        "total_chunks": total_chunks,
+        "manifest_errors": errors  # <<<<<<<<<<<< THIS IS THE KEY
     }
-
+# ============================
+# 🩹 Healing Process
+# ============================
 @app.post("/heal_now")
 def heal_now():
     """
-    🧪 Manual Healing Trigger
-    Fire this to kick off one round of healing manually.
+    🩹 Manually slap on band-aids to busted chunks.
     """
     threading.Thread(target=heal_chunks, daemon=True).start()
     return {"status": "Healing started in background"}
 
+
+# The fixed, glorious way
 def mark_node_dead(dead_node_id: str):
-    """
-    💀 Removes dead node from manifests and adds affected chunks to the healing queue.
-    """
-    print(f"⚰️ Node {dead_node_id} marked dead")
-    for file_id, manifest in file_manifests.items():
-        for chunk in manifest["chunks"]:
-            if dead_node_id in chunk["node_ids"]:
-                chunk["node_ids"].remove(dead_node_id)
-                if len(chunk["node_ids"]) < CHUNK_REDUNDANCY:
-                    if chunk["chunk_id"] not in healing_queue:
-                        healing_queue.append(chunk["chunk_id"])
-                        print(f"🚑 Queued {chunk['chunk_id']} for healing")
+    """⚰️ Lays a node to rest and queues its chunks for reincarnation."""
+    print(f"⚰️ Node {dead_node_id} has been marked for death.")
 
+    # Get the simple list of all known file IDs.
+    all_file_ids = manifest_manager.list_manifests()
 
-def heal_chunks():
-    """
-    🩹 New & Improved Healing Loop: only works on the queue of known injured chunks.
-    """
-    while True:
-        if healing_queue:
-            print(f"🧪 Healing Queue: {len(healing_queue)} chunks")
-        else:
-            time.sleep(5)
+    # Loop through the IDs one by one.
+    for file_id in all_file_ids:
+        try:
+            # For each ID, load the full manifest from disk.
+            manifest = manifest_manager.load_manifest(file_id)
+
+            # --- Your original logic now works perfectly ---
+            needs_update = False
+            for chunk in manifest.get("chunks", []):
+                if dead_node_id in chunk.get("node_ids", []):
+                    chunk["node_ids"].remove(dead_node_id)
+                    needs_update = True
+                    print(f"  -> Found chunk {chunk['chunk_id']} belonging to dead node.")
+
+                    if len(chunk["node_ids"]) < CHUNK_REDUNDANCY:
+                        if chunk["chunk_id"] not in healing_queue:
+                            healing_queue.append(chunk["chunk_id"])
+                            print(f"    🚑 Queued {chunk['chunk_id']} for emergency healing.")
+
+            # If we made any changes, save the manifest back to disk.
+            if needs_update:
+                manifest_manager.update_manifest(file_id, manifest)
+                print(f"  -> Updated manifest for {file_id}.")
+
+        except FileNotFoundError:
+            # This is fine. Just means the manifest was a ghost.
+            print(f"  -> Skipped ghost manifest for {file_id}.")
             continue
 
-        chunk_id = healing_queue.pop(0)  # FIFO healing
 
-        # 🧙 Scan all manifests for this chunk
-        for file_id, manifest in file_manifests.items():
-            for chunk in manifest["chunks"]:
-                if chunk["chunk_id"] != chunk_id:
-                    continue
+# ============================
+# ❤️‍🩹 The Healing Daemon (V2)
+# ============================
+def heal_chunks():
+    """
+    🩹 Patches wounded soldiers (chunks) from the healing queue.
 
-                alive_nodes = chunk["node_ids"]
-                needed = CHUNK_REDUNDANCY - len(alive_nodes)
+       b
+        This is the heart of our network's resilience. It never sleeps.
+    """
+    while True:
+        if not healing_queue:
+            time.sleep(5)  # Rest if there are no wounded.
+            continue
 
-                if needed <= 0:
-                    break  # nothing to do
+        print(f"🧪 Healing Queue has {len(healing_queue)} chunks. Engaging...")
+        chunk_id_to_heal = healing_queue.pop(0)  # FIFO healing
 
-                available_nodes = [nid for nid in nodes if nid not in alive_nodes]
-                random.shuffle(available_nodes)
+        found_and_healed = False
+        all_file_ids = manifest_manager.list_manifests()
 
-                for new_node in available_nodes:
-                    if needed == 0:
-                        break
-                    if not alive_nodes:
-                        print(f"⚠️ No healthy replicas for {chunk_id}")
-                        break
+        # 🧙 Scan all manifests to find the parent of this wounded chunk.
+        for file_id in all_file_ids:
+            if found_and_healed: break
+            try:
+                manifest = manifest_manager.load_manifest(file_id)
+                for chunk in manifest.get("chunks", []):
+                    if chunk.get("chunk_id") == chunk_id_to_heal:
+                        # --- We found the patient. Now, operate. ---
 
-                    donor_node = random.choice(alive_nodes)
-                    chunk_url = f"http://{nodes[donor_node]['ip']}:{nodes[donor_node]['port']}/chunk/{chunk_id}"
-                    store_url = f"http://{nodes[new_node]['ip']}:{nodes[new_node]['port']}/store_chunk"
+                        alive_nodes = chunk.get("node_ids", [])
+                        needed = CHUNK_REDUNDANCY - len(alive_nodes)
 
-                    try:
-                        res = requests.get(chunk_url)
-                        if res.status_code == 200:
-                            push = requests.post(store_url, files={"chunk": res.content}, data={"chunk_id": chunk_id})
-                            if push.status_code == 200:
-                                chunk["node_ids"].append(new_node)
-                                alive_nodes.append(new_node)
-                                needed -= 1
-                                print(f"🧩 Healed {chunk_id} → {new_node}")
-                        else:
-                            print(f"⚠️ Chunk {chunk_id} fetch from {donor_node} failed")
-                    except Exception as e:
-                        print(f"🔥 Healing error: {e}")
-                break
+                        if needed <= 0:
+                            print(f"✅ Chunk {chunk_id_to_heal} is already healthy. False alarm.")
+                            found_and_healed = True
+                            break
 
+                        available_nodes = [nid for nid in nodes if nid not in alive_nodes]
+                        random.shuffle(available_nodes)
 
-# 🧵 Launch background healing thread on startup
+                        if not alive_nodes:
+                            print(f"💀 CRITICAL: All replicas for {chunk_id_to_heal} are lost. Unhealable.")
+                            found_and_healed = True  # We handled it, even if it failed.
+                            break
+
+                        # Find new homes for the replicas.
+                        for new_node_id in available_nodes:
+                            if needed <= 0: break
+
+                            donor_node_id = random.choice(alive_nodes)
+                            donor_node = nodes.get(donor_node_id)
+                            new_node = nodes.get(new_node_id)
+
+                            if not donor_node or not new_node: continue
+
+                            chunk_url = f"http://{donor_node['ip']}:{donor_node['port']}/chunk/{chunk_id_to_heal}"
+                            store_url = f"http://{new_node['ip']}:{new_node['port']}/store_chunk"
+
+                            try:
+                                print(
+                                    f"  -> Attempting to copy {chunk_id_to_heal} from {donor_node_id} to {new_node_id}...")
+                                res = requests.get(chunk_url, timeout=5)
+                                if res.status_code == 200:
+                                    push = requests.post(store_url, files={"chunk": res.content},
+                                                         data={"chunk_id": chunk_id_to_heal})
+                                    if push.status_code == 200:
+                                        chunk["node_ids"].append(new_node_id)
+                                        alive_nodes.append(new_node_id)
+                                        needed -= 1
+                                        print(f"    🧩 SUCCESS: Healed {chunk_id_to_heal} -> {new_node_id}")
+                                    else:
+                                        print(f"    ⚠️ FAILED to store chunk on {new_node_id}.")
+                                else:
+                                    print(f"    ⚠️ FAILED to fetch chunk from donor {donor_node_id}.")
+                            except Exception as e:
+                                print(f"    🔥 HEALING ERROR during replication: {e}")
+
+                        # After attempting to heal, save the updated manifest.
+                        manifest_manager.update_manifest(file_id, manifest)
+                        found_and_healed = True
+                        break  # Move to the next chunk in the queue
+
+            except FileNotFoundError:
+                continue
+
 threading.Thread(target=heal_chunks, daemon=True).start()

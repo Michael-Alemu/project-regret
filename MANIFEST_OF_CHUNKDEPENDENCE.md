@@ -1,10 +1,3 @@
-You got it, Commander.
-Here’s the clean .md format — ready for your repo, your heart, and your dreams:
-
-⸻
-
-
-
 # Manifest of Chunkdependence™
 
 ## 📜 Preamble:
