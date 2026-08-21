@@ -29,8 +29,9 @@
 | Manifest v2 (with key map) | ✅ **Complete**  | Was "🚀 Next Up." Manifest-as-a-chunk lives; master key persisted to disk. |
 | Redundancy (Multi-Node)    | ✅ **Proven**    | Was "Prototype." 3 *distinct* replicas, honestly counted (phantom soldiers purged). |
 | Healing Algorithm          | ✅ **Proven**    | Was "Prototype." Survived a live node execution. Twice. On purpose. |
-| Chaos Testing              | ✅ NEW           | `CHAOSTEST.py`: 5 stages, 11 checks, self-cleaning test republic. The graduation exam. |
-| Network Chaos (GREMLIN™)   | 🚀 Next Up       | Ratified Aug 20, 2026: chaos proxy (latency/loss/partition) as CHAOSTEST Stage 6. |
+| Chaos Testing              | ✅ NEW           | `CHAOSTEST.py`: 6 stages, 19 checks, self-cleaning test republic. The graduation exam. |
+| Network Chaos (GREMLIN™)   | ✅ **Complete**  | Ratified AND built Aug 20, 2026. THE STORM (Stage 6): latency, partitions, rejoin — 19/19. |
+| Redundancy Patrol          | ✅ NEW           | Auto-rebalancing every 15s — the 2025 board's 🥈 promise, delivered 471 days later. |
 | Real Hardware (Phase 2)    | 🌑 The Frontier  | NAT, TLS, node identity. Plymouth Rock → Golden Gate. |
 | ChunkCompute™              | 🌑 The Prize     | Sequenced after the network leaves localhost. The founding wish endures. |
 
@@ -67,11 +68,11 @@
 
 | Priority | Task |
 |----------|------|
-| 🥇 | Merge `plymouth/phase-0` into main |
-| 🥈 | GREMLIN.py + CHAOSTEST Stage 6: THE STORM (latency, loss, partition, rejoin-after-partition) |
-| 🥉 | Honesty fixes: real HTTPExceptions (no more fake 502-tuples-inside-a-200), `dead_chunks` surfaced in `/status` |
-| 🪄 | Phase 2 opening move: pull-based node communication design (the NAT answer) |
-| 🧪 | First node on real hardware — the network leaves this machine |
+| ~~🥇~~ | ~~Merge `plymouth/phase-0` into main~~ ✅ Done Aug 20, 2026 |
+| ~~🥈~~ | ~~GREMLIN.py + CHAOSTEST Stage 6: THE STORM~~ ✅ Done same day. 19/19. We don't mess around anymore |
+| 🥇 | Honesty fixes: real HTTPExceptions (no more fake 502-tuples-inside-a-200), `dead_chunks` surfaced in `/status` |
+| 🥈 | Phase 2 opening move: pull-based node communication design (the NAT answer — ADVERTISE_PORT was the first rehearsal) |
+| 🥉 | First node on real hardware — the network leaves this machine |
 
 ---
 

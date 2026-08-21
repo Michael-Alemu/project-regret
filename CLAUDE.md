@@ -19,16 +19,21 @@ pip install -r requirements.txt
 uvicorn Coordinator:app --port 8000
 
 # Storage node (Flask). Configure via env: NODE_ID, NODE_PORT (default 5001),
-# CHUNK_FOLDER, COORDINATOR_URL — so N real nodes can run side by side
+# CHUNK_FOLDER, COORDINATOR_URL, ADVERTISE_PORT (port told to the coordinator,
+# for when a proxy/NAT stands in front — defaults to NODE_PORT)
 NODE_ID=node-5001 NODE_PORT=5001 python node_server.py
 
 # Node heartbeat client (same env vars; registers + heartbeats every 5s, re-registers on 404)
 NODE_ID=node-5001 NODE_PORT=5001 python client_node.py
 
-# THE test: full chaos exam — boots a real coordinator + 4 real node pairs as
-# subprocesses, tests round-trip, upload collision, node-kill healing, and
-# coordinator restart. Self-cleaning; uses ports 18000/15001-15004.
+# THE test: full chaos exam — boots a real coordinator + 4 real node pairs
+# (each behind GREMLIN chaos proxies), tests round-trip, upload collision,
+# node-kill healing, coordinator restart, and THE STORM (latency, partitions,
+# rejoin). Self-cleaning; uses ports 18000/15001-15004/16xxx/17xxx.
 python CHAOSTEST.py
+
+# Manual network chaos: a standalone TCP chaos proxy (latency/jitter/drop/partition)
+python GREMLIN.py 16001 127.0.0.1:5001 --latency 0.5
 
 # Legacy quick smoke test (phantom nodes, needs a coordinator already running on 8000)
 python SMOKETEST.py
@@ -48,7 +53,7 @@ Two tiers: **one coordinator** (control plane + data broker) and **N storage nod
 - **Download path:** load manifest → for each chunk try each holding node until one answers → decrypt → reassemble → `FileResponse` with cleanup queued as a FastAPI `BackgroundTask`.
 - **Manifest v2** (`manifest_utils.py`, `ManifestChunkManager`): the manifest is *itself* chunked and encrypted — JSON → 4096-byte slices → Fernet-encrypted → `work_dir/manifests/{file_id}_manifest_chunk_{idx:04d}.bin`. This implements "Manifest as a Chunk" (Article VII of `MANIFEST_OF_CHUNKDEPENDENCE.md`). Writes are guarded by a single `threading.Lock`; `update_manifest` is a destructive rewrite.
 - **Encryption** (`crypto_utils.py`): Fernet throughout. `generate_key()` deliberately returns a base64 **str** so keys are JSON-serializable inside manifests; `_normalize_key()` coerces str-or-bytes back to valid Fernet bytes. Two key layers: a per-file key stored inside the manifest (encrypts data chunks), and a coordinator-wide manifest key generated at import time in `Coordinator.py`.
-- **Healing:** heartbeats reap nodes not seen for `HEARTBEAT_TIMEOUT = 30`s; `mark_node_dead()` strips the node from every manifest and queues under-replicated chunks in `healing_queue`; a daemon thread (`heal_chunks`, started at module import) copies still-encrypted chunks from a surviving donor to fresh nodes until redundancy is restored.
+- **Healing:** heartbeats reap nodes not seen for `HEARTBEAT_TIMEOUT = 30`s; `mark_node_dead()` strips the node from every manifest and queues under-replicated chunks in `healing_queue`; a daemon thread (`heal_chunks`, started at module import via `ensure_healer()`) copies still-encrypted chunks from a surviving donor to fresh nodes until redundancy is restored. A second daemon, the **Redundancy Patrol** (`redundancy_patrol`, every `PATROL_INTERVAL = 15`s), re-scans all manifests and re-queues any chunk below redundancy whenever a fix is possible — this is what heals chunks after a node rejoins (e.g. post-partition).
 - **Config split:** `config.py` is coordinator-side (`work_dir` layout, `CHUNK_SIZE_BYTES`, import-time mkdirs); `node_config.py` is node-side (`NODE_ID`, `PORT`, `COORDINATOR_URL`). `chunk_utils.py` and `crypto_utils.py` are leaf utilities with no project imports.
 
 ## Known rough edges
