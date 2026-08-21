@@ -28,6 +28,7 @@ from manifest_utils import ManifestChunkManager
 # ============================
 CHUNK_REDUNDANCY = 3
 HEARTBEAT_TIMEOUT = 30
+PATROL_INTERVAL = 15  # ⏱️ how often the Redundancy Patrol walks the walls
 healing_queue = []
 
 # ============================
@@ -594,4 +595,50 @@ def heal_chunks():
             except FileNotFoundError:
                 continue
 
+# ============================
+# 🛡️ The Redundancy Patrol
+# ============================
+# The healer only treats chunks someone ELSE noticed were wounded
+# (mark_node_dead queues them exactly once, at the moment of death).
+# But wounds outlive the moment: if healing couldn't finish — say, no spare
+# node existed — nothing ever looked again. A node rejoining after a
+# partition changed nothing. Under-replication just... sat there, quietly.
+#
+# The Patrol walks every manifest on a timer and re-queues any chunk with
+# fewer than CHUNK_REDUNDANCY distinct replicas — but only when a fix is
+# actually possible (a living holder to copy from, and a spare to copy to).
+# This is the "auto-triggered rebalancing" the May 2025 chunkboard promised.
+def redundancy_patrol():
+    """🛡️ Walks the walls. Finds the under-replicated. Files the paperwork."""
+    while True:
+        time.sleep(PATROL_INTERVAL)
+        try:
+            for file_id in manifest_manager.list_manifests():
+                try:
+                    manifest = manifest_manager.load_manifest(file_id)
+                except Exception:
+                    continue  # a sealed scroll is the /status endpoint's problem
+                for chunk in manifest.get("chunks", []):
+                    holders = set(chunk.get("node_ids", []))
+                    alive_holders = holders & set(nodes.keys())
+                    spares = set(nodes.keys()) - holders
+                    if (len(holders) < CHUNK_REDUNDANCY
+                            and alive_holders    # someone to copy FROM
+                            and spares           # somewhere to copy TO
+                            and chunk["chunk_id"] not in healing_queue):
+                        healing_queue.append(chunk["chunk_id"])
+                        print(f"🛡️ Patrol found {chunk['chunk_id']} at "
+                              f"{len(holders)}/{CHUNK_REDUNDANCY} replicas. Queued.")
+        except Exception as e:
+            print(f"🛡️💥 Patrol stumbled (continuing anyway): {e}")
+
+_patrol_on_duty = threading.Event()
+
+def ensure_patrol():
+    """🛡️ Exactly one patrol walks the walls. Ever."""
+    if not _patrol_on_duty.is_set():
+        _patrol_on_duty.set()
+        threading.Thread(target=redundancy_patrol, daemon=True).start()
+
 ensure_healer()  # ⛑️ the on-call shift begins at import
+ensure_patrol()  # 🛡️ and the walls are never unwatched
