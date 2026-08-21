@@ -29,6 +29,11 @@ def heartbeat():
 
             if res.status_code == 200:
                 print(f"[{NODE_ID}] ❤️ Coordinator {res.status_code}.")
+            elif res.status_code == 404:
+                # 👻 Coordinator rebooted and forgot we exist. Rude. We used to just
+                # scream heartbeats into the void forever — now we re-introduce ourselves.
+                print(f"[{NODE_ID}] 👻 Coordinator called us a ghost. Re-registering...")
+                register()
             else:
                 print(f"[{NODE_ID}] 💔 Unexpected heartbeat response: {res.status_code} - {res.text}")
 
