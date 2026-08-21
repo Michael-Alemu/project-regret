@@ -1,0 +1,9 @@
+# 📜 The official supply manifest of the Republic of Chunks.
+# pip install -r requirements.txt and the network shall rise.
+fastapi
+uvicorn
+pydantic
+flask
+requests
+cryptography
+python-multipart

@@ -1,6 +1,9 @@
 # ============================================
 # 🔐 Crypto Utilities (Crypteia Mode - FINAL)
 # ============================================
+# 🕰️ Time-travel insurance: lets the fancy `str | bytes` type hints run on
+# Python 3.9, which is what some of our machines are still rocking.
+from __future__ import annotations
 from cryptography.fernet import Fernet
 import base64
 

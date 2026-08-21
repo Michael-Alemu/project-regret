@@ -3,6 +3,9 @@
 # The sacred scroll keeper for the Republic of Chunks.
 # This isn't just a class, it's the network's memory. Handle with care.
 # ==========================================================
+# 🕰️ Py3.9 compat for the `str | bytes` hints below. The scrolls must open everywhere.
+from __future__ import annotations
+
 import os
 import json
 import threading

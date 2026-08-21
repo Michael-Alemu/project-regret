@@ -1,0 +1,14 @@
+# 🧹 Runtime debris — the network's laundry, not its constitution.
+work_dir/
+chunks/
+chunks_out/
+
+# 🐍 Python droppings
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# 📦 Reassembled/downloaded test artifacts
+reassembled_*
+downloaded_*
