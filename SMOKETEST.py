@@ -1,6 +1,7 @@
 # =============================
 # 🧪 Multi-Node Network Test
 # =============================
+import os
 import requests
 import time
 import random
@@ -8,7 +9,16 @@ import random
 COORDINATOR_URL = "http://localhost:8000"
 NODE_PORTS = [5001, 5002, 5003]  # Simulate 3 nodes
 NODE_IDS = [f"node-{port}" for port in NODE_PORTS]
-TEST_FILE_PATH = "/Users/kingkong/DEV/p2p/TEST_Payment_Confirmation.pdf"  # Use a real file here
+# 🧪 Self-generating test payload — no more hardcoded PDFs from another dimension
+TEST_FILE_PATH = os.path.join("work_dir", "smoketest_payload.bin")
+
+def ensure_test_file():
+    """🥚 Lay the test file if it doesn't exist yet. 300KB of pure nonsense."""
+    if not os.path.exists(TEST_FILE_PATH):
+        os.makedirs(os.path.dirname(TEST_FILE_PATH), exist_ok=True)
+        with open(TEST_FILE_PATH, "wb") as f:
+            f.write(os.urandom(300 * 1024))
+        print(f"🥚 Generated test payload at {TEST_FILE_PATH}")
 
 def register_all_nodes():
     for node_id, port in zip(NODE_IDS, NODE_PORTS):
@@ -61,6 +71,7 @@ def verify_status():
     print(res.status_code, res.json())
 
 if __name__ == "__main__":
+    ensure_test_file()
     register_all_nodes()
     time.sleep(1)
     heartbeat_all()
