@@ -1,7 +1,7 @@
 # ============================
 # 🎬 Imports & Config
 # ============================
-from config import TEMP_CHUNK_DIR, TEMP_UPLOAD_DIR, MANIFEST_DIR, CHUNK_SIZE_BYTES
+from config import TEMP_CHUNK_DIR, TEMP_UPLOAD_DIR, MANIFEST_DIR, CHUNK_SIZE_BYTES, MASTER_KEY_PATH
 from pathlib import Path
 import json
 
@@ -33,7 +33,14 @@ healing_queue = []
 # ============================
 # 📜 Manifest Manager Setup
 # ============================
-manifest_encryption_key = generate_key()
+# 🧠 The republic REMEMBERS now. The master key used to be regenerated every
+# boot, which meant a coordinator restart turned every manifest on disk into
+# beautifully encrypted garbage. Load it from disk; mint it only once, ever.
+if MASTER_KEY_PATH.exists():
+    manifest_encryption_key = MASTER_KEY_PATH.read_text().strip()  # 📖 welcome back, old friend
+else:
+    manifest_encryption_key = generate_key()
+    MASTER_KEY_PATH.write_text(manifest_encryption_key)  # 🪦 carve it in stone (well, disk)
 
 manifest_manager = ManifestChunkManager(
     manifest_dir=MANIFEST_DIR,

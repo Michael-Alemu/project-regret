@@ -12,6 +12,10 @@ MANIFEST_DIR = WORK_DIR / "manifests"
 TEMP_CHUNK_DIR = WORK_DIR / "temp_chunks"
 TEMP_UPLOAD_DIR = WORK_DIR / "temp_uploads"
 
+# 🔑 Where the manifest master key sleeps between coordinator lifetimes.
+# Lose this file, lose every manifest. Guard it like the last cheeseburger on Earth.
+MASTER_KEY_PATH = WORK_DIR / "manifest_master.key"
+
 # 🧩 Chunk size in bytes
 CHUNK_SIZE_BYTES = 100 * 1024  # 100KB
 
