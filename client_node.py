@@ -3,7 +3,7 @@
 # ============================
 import requests
 import time
-from node_config import NODE_ID, COORDINATOR_URL, PORT
+from node_config import NODE_ID, COORDINATOR_URL, PORT, ADVERTISE_PORT
 
 STORAGE_AVAILABLE = 1024  # totally real amount of space
 
@@ -14,9 +14,9 @@ def register():
             "node_id": NODE_ID,
             "storage_available": STORAGE_AVAILABLE,
             "ip": "127.0.0.1",  # make this dynamic later.
-            "port": PORT
+            "port": ADVERTISE_PORT  # 📣 advertise the doorway, not the room
         })
-        print(f"[{NODE_ID}] ✅ Registration: {res.status_code} - {res.json()} PORT 🔌 {PORT}")
+        print(f"[{NODE_ID}] ✅ Registration: {res.status_code} - {res.json()} PORT 🔌 {PORT} (advertised {ADVERTISE_PORT})")
     except Exception as e:
         print(f"[{NODE_ID}] ❌ Registration failed: {e}")
 
