@@ -251,7 +251,8 @@ def upload_file(file: UploadFile = File(...)):
 
     # 🛡️ Generate an encryption key for this file
     file_key = generate_key()
-    chunk_paths = split_file(temp_file_path, chunk_size_bytes=CHUNK_SIZE_BYTES)
+    # 🏷️ Prefix chunks with the file_id — no more chunk fratricide between uploads
+    chunk_paths = split_file(temp_file_path, chunk_size_bytes=CHUNK_SIZE_BYTES, prefix=f"{file_id}_")
 
     if not nodes:
         return {"error": "No nodes online"}, 503
