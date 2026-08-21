@@ -523,7 +523,11 @@ def heal_chunks():
                     if chunk.get("chunk_id") == chunk_id_to_heal:
                         # --- We found the patient. Now, operate. ---
 
-                        alive_nodes = chunk.get("node_ids", [])
+                        # ⚠️ COPY, not alias! This used to be the same list object as
+                        # chunk["node_ids"], so the success path below appended the new
+                        # node to "both" lists — i.e. twice to one list. Phantom replicas
+                        # in the manifest, inflated counts, hidden under-replication.
+                        alive_nodes = list(chunk.get("node_ids", []))
                         needed = CHUNK_REDUNDANCY - len(alive_nodes)
 
                         if needed <= 0:
