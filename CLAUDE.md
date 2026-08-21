@@ -6,34 +6,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Project Regret** (working name: **IonNet**) is a prototype peer-to-peer encrypted chunked storage network in Python. Files uploaded to a central coordinator are split into 100KB chunks, Fernet-encrypted, replicated across storage nodes, and self-heal when nodes die. Everything talks plain HTTP.
 
-There is no package manifest, no lockfile, no CI, no unit test framework, and no `.gitignore`. Dependencies must be installed manually:
+Requires Python 3.9+. No CI or unit test framework; the test story is the two end-to-end scripts below.
 
 ```
-pip install fastapi uvicorn pydantic flask requests cryptography python-multipart
+pip install -r requirements.txt
 ```
 
 ## Commands
 
 ```bash
-# Coordinator (FastAPI, port 8000 — node_config.py expects it there)
+# Coordinator (FastAPI, port 8000 — node_config.py's default COORDINATOR_URL expects it there)
 uvicorn Coordinator:app --port 8000
 
-# Storage node (Flask, port hardcoded to 5001 in node_config.py)
-python node_server.py
+# Storage node (Flask). Configure via env: NODE_ID, NODE_PORT (default 5001),
+# CHUNK_FOLDER, COORDINATOR_URL — so N real nodes can run side by side
+NODE_ID=node-5001 NODE_PORT=5001 python node_server.py
 
-# Node heartbeat client (registers with coordinator, heartbeats every 5s)
-python client_node.py
+# Node heartbeat client (same env vars; registers + heartbeats every 5s, re-registers on 404)
+NODE_ID=node-5001 NODE_PORT=5001 python client_node.py
 
-# The only test harness: end-to-end smoke test (upload → manifest → status → download)
+# THE test: full chaos exam — boots a real coordinator + 4 real node pairs as
+# subprocesses, tests round-trip, upload collision, node-kill healing, and
+# coordinator restart. Self-cleaning; uses ports 18000/15001-15004.
+python CHAOSTEST.py
+
+# Legacy quick smoke test (phantom nodes, needs a coordinator already running on 8000)
 python SMOKETEST.py
 ```
 
-There are no unit tests, so there is no "run a single test" — the closest is calling one smoke-test step directly, e.g. `python -c "import SMOKETEST; SMOKETEST.verify_status()"`.
+There are no unit tests — CHAOSTEST.py is the acceptance gate; run it after any change to the chunk lifecycle, healing, or manifests. The closest thing to "one test" is a single stage function in it, or e.g. `python -c "import SMOKETEST; SMOKETEST.verify_status()"`.
 
-**Smoke test gotchas:**
-- `SMOKETEST.py` hardcodes `TEST_FILE_PATH` to an absolute path *outside this repo*; it cannot run as-is unless that file exists (or the path is edited).
-- It assumes three nodes on ports 5001–5003, but `node_config.py` hardcodes `PORT = 5001` and a random `NODE_ID` per process — you cannot start three real nodes without editing `node_config.py`. The smoke test registers phantom nodes with the coordinator regardless.
-- Runtime state lands in `work_dir/` (created at import time by `config.py`) and `chunks/` (created by `node_server.py`). Neither is gitignored — don't commit them.
+Runtime state lands in `work_dir/` (created at import time by `config.py`) and `chunks/` (created by `node_server.py`); both are gitignored. `work_dir/manifest_master.key` is the coordinator's manifest encryption key — deleting it permanently orphans every stored file.
 
 ## Architecture
 
@@ -48,12 +51,14 @@ Two tiers: **one coordinator** (control plane + data broker) and **N storage nod
 - **Healing:** heartbeats reap nodes not seen for `HEARTBEAT_TIMEOUT = 30`s; `mark_node_dead()` strips the node from every manifest and queues under-replicated chunks in `healing_queue`; a daemon thread (`heal_chunks`, started at module import) copies still-encrypted chunks from a surviving donor to fresh nodes until redundancy is restored.
 - **Config split:** `config.py` is coordinator-side (`work_dir` layout, `CHUNK_SIZE_BYTES`, import-time mkdirs); `node_config.py` is node-side (`NODE_ID`, `PORT`, `COORDINATOR_URL`). `chunk_utils.py` and `crypto_utils.py` are leaf utilities with no project imports.
 
-## Known landmines
+## Known rough edges
 
-- **The manifest encryption key is ephemeral.** `manifest_encryption_key` is regenerated at every coordinator start and never persisted, so manifests written by a previous run cannot be decrypted after a restart — despite the commit history claiming restart survival. `/status` swallows these failures into a `manifest_errors` list instead of crashing. This is the biggest latent bug.
-- `POST /heal_now` spawns an additional competing healer daemon on every call.
-- The healer re-uploads chunks with `files={"chunk": res.content}` (no filename tuple, unlike the upload path).
-- A chunk with zero surviving replicas is declared unhealable and silently dropped from the queue.
+(The Phase 0 bug wave — chunk-ID collisions between uploads, the ephemeral manifest key, nodes never re-registering after coordinator restart, healer double-counting replicas, cwd-relative chunk folders — was fixed and is guarded by CHAOSTEST.py.)
+
+- A chunk with zero surviving replicas is declared unhealable and **silently dropped** from the healing queue; `/status` does not surface it.
+- The healer re-uploads chunks with `files={"chunk": res.content}` (bare bytes, no filename tuple like the upload path uses) — works, but relies on requests' default part naming.
+- The coordinator is a single point of failure and its `nodes`/`chunk_map` registries are RAM-only (manifests are the durable record).
+- Per-file encryption keys are stored in plaintext inside the (master-key-encrypted) manifests.
 
 ## Docs and conventions
 

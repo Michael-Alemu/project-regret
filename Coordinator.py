@@ -446,13 +446,24 @@ def get_system_status():
 # ============================
 # 🩹 Healing Process
 # ============================
+# 🚨 One healer to rule them all. This used to spawn a NEW competing daemon on
+# every /heal_now call — a growing army of medics fighting over the same queue.
+_healer_on_duty = threading.Event()
+
+def ensure_healer():
+    """🩺 Start the healing daemon exactly once. Repeat calls are a no-op."""
+    if not _healer_on_duty.is_set():
+        _healer_on_duty.set()
+        threading.Thread(target=heal_chunks, daemon=True).start()
+
 @app.post("/heal_now")
 def heal_now():
     """
     🩹 Manually slap on band-aids to busted chunks.
+    (The healer never sleeps anyway — this just guarantees one is on duty.)
     """
-    threading.Thread(target=heal_chunks, daemon=True).start()
-    return {"status": "Healing started in background"}
+    ensure_healer()
+    return {"status": "Healer on duty"}
 
 
 # The fixed, glorious way
@@ -583,4 +594,4 @@ def heal_chunks():
             except FileNotFoundError:
                 continue
 
-threading.Thread(target=heal_chunks, daemon=True).start()
+ensure_healer()  # ⛑️ the on-call shift begins at import
